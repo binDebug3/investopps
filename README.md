@@ -76,7 +76,7 @@ python query.py --tol -0.3 --period 10
 
 | Argument   | Description                                          | Default |
 |------------|------------------------------------------------------|---------|
-| `--tol`    | Percentage drop threshold (e.g. -0.25 for -25%)      | -0.25   |
+| `--tol`    | Percentage drop threshold (e.g. -25 for -25%)      | -25   |
 | `--period` | Number of days to include in the recent history scan | 7       |
 
 File structure:
