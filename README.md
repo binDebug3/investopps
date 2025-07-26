@@ -1,6 +1,6 @@
 # BargainFinder
 
-BargainFinder identifies undervalued stocks based on recent price movements and generates automated weekly reports. It checks for significant drops over one-month and three-month windows, tracks historical bargains, and provides direct links for quick research. The program runs quietly in the background, evaluates tickers at a set hour each weekday, and sends HTML reports via Gmail every Thursday.
+BargainFinder identifies undervalued stocks based on recent price movements and generates automated weekly reports. It checks for significant drops over one-month and three-month windows, tracks historical bargains, and provides direct links for quick research. The program runs quietly in the background, evaluates tickers at a set hour each weekday, and sends tabular reports via email every Thursday.
 
 ---
 
@@ -27,13 +27,10 @@ Markets swing. Most investors miss the right moment to capitalize. BargainFinder
 ## Features
 
 - Filters stocks that fall below a defined threshold
-- Tracks 1-month and 3-month percent changes
 - Logs daily bargains into a persistent history
-- Sends clean HTML email reports every Thursday
+- Sends clean email reports every Thursday
 - Includes research links for each ticker
 - Automatically schedules and runs silently
-- Avoids duplicate updates using an update log
-- Cleanly separates data, logs, config, and reports
 
 ---
 
@@ -68,17 +65,6 @@ Markets swing. Most investors miss the right moment to capitalize. BargainFinder
 
 ## Configuration
 
-The main class accepts several arguments:
-
-```bash
-python query.py --tol -0.3 --period 10
-```
-
-| Argument   | Description                                          | Default |
-|------------|------------------------------------------------------|---------|
-| `--tol`    | Percentage drop threshold (e.g. -25 for -25%)      | -25   |
-| `--period` | Number of days to include in the recent history scan | 7       |
-
 File structure:
 
 ```
@@ -88,6 +74,7 @@ data/
 meta/
 ├── tickers.txt
 ├── credentials.json
+├── config.yaml
 └── update_log.txt
 investopps/
 ├── query.py
@@ -144,7 +131,6 @@ Ensure `credentials.json` is correct and the Gmail API is enabled for your accou
 
 Built and maintained by Dallin Stewart.  
 Contact: [dallinpstewar@gmail.com]  
-No external contributors at this time.
 
 ---
 

@@ -2,12 +2,12 @@ import yfinance as yf
 import pandas as pd
 import pdb
 import os
-from send_email import send_table
+from send_email import send_table, send_email
 import time
 from datetime import datetime
-import argparse
 import logging
 import yaml
+import traceback
 
 
 """
@@ -27,11 +27,6 @@ A bunch of file paths:
     history_path: str - Path to the CSV file where bargain history will be saved.
     update_log: str - Path to the file where the last update time will be logged.
     log_path: str - Path to the log file for logging updates and errors.
-
-subject: str
-    Subject line for the email report.
-recipient: str
-    Email address to send the report to.
 """
 class BargainFinder(object):
     
@@ -46,8 +41,8 @@ class BargainFinder(object):
         """
         self.config_path: str = config_path
         self._read_config(self.config_path, initialize=True)
-        self.update_time: pd.Timestamp = None
         self._set_logging()
+        self.update_time: pd.Timestamp = pd.to_datetime("now").normalize() - pd.Timedelta(days=7) # arbitrary past date
 
 
 
@@ -88,15 +83,20 @@ class BargainFinder(object):
 
         # set class attributes with defaults if not present
         self.tol: float = float(config.get("tol", -20))
-        self.period_length: int = int(config.get("period_length", 7))
+        self.email_rate: int = int(config.get("email_rate", 7))
+        self.high_price_period: str = config.get("high_price_period", "500d")
         self.update_hour: int = int(config.get("update_hour", 15))
         self.ticker_path: str = config.get("ticker_path", "meta/tickers.txt")
+        self.htick_path: str = config.get("htick_path", "meta/high_tickers.txt")
         self.prices_path: str = config.get("prices_path", "data/prices.csv")
+        self.raw_prices_path: str = config.get("raw_prices_path", "data/raw_prices.csv")
         self.history_path: str = config.get("history_path", "data/bargain_history.csv")
-        self.update_log: str = config.get("update_log", "meta/update_log.txt")
+        self.update_log_path: str = config.get("update_log_path", "meta/update_log.txt")
         self.log_path: str = config.get("log_path", "logs/bargain_finder_{}.log")
-        self.subject: str = config.get("subject", "Weekly Bargain Report")
+        self.bargain_subject: str = config.get("bargain_subject", "Weekly Bargain Report")
+        self.sell_subject: str = config.get("sell_subject", "Sell Opportunity Found!")
         self.recipient: str = config.get("recipient", "")
+        self.to_sell_tickers: list = None
         
         # Log changes in attributes
         if not initialize:
@@ -110,13 +110,19 @@ class BargainFinder(object):
         """
         Set up logging for the BargainFinder class.
         """
-        self.logger: logging.Logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.INFO)
+        now_str: str = "persistent"
+        log_file: str = self.log_path.format(now_str)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='[%(asctime)s] %(levelname)s in %(funcName)s: %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            filename=log_file
+        )
+        self.logger: logging.Logger = logging.getLogger()
 
         # Only add handlers once (avoid duplicates when re-instantiating)
         if not self.logger.handlers:
-            now_str: str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file: str = self.log_path.format(now_str)
+            # now_str: str = datetime.now().strftime("%Y%m%d_%H%M%S")
             handler: logging.FileHandler = logging.FileHandler(log_file)
             formatter: logging.Formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
             handler.setFormatter(formatter)
@@ -124,19 +130,21 @@ class BargainFinder(object):
         
         self.logger.info(f"Program initialized with PID {os.getpid()}")
         self.logger.info("BargainFinder initialized with tol=%s, period_length=%s, update_hour=%s",
-                         self.tol, self.period_length, self.update_hour)
+                         self.tol, self.email_rate, self.update_hour)
     
     
     
     # ---- PUBLIC STATE MANAGEMENT METHODS ----
     
-    def get_tickers(self) -> list:
+    def get_tickers(self, file_path: str = None) -> list:
         """
         Read tickers from a file.
         """
-        with open(self.ticker_path, 'r') as file:
+        if file_path is None:
+            file_path = self.ticker_path
+        with open(file_path, 'r') as file:
             tickers: list = [line.strip() for line in file if line.strip()]
-        self.logger.info(f"Loaded {len(tickers)} tickers from {self.ticker_path}")
+        self.logger.info(f"Loaded {len(tickers)} tickers from {file_path}")
         return tickers
     
     
@@ -146,27 +154,33 @@ class BargainFinder(object):
         """
         # Warn the user if there is an active terminal session to print to
         if os.isatty(0):
-            input("Press 'Enter' to clear the bargain history file.")
+            input("Press 'Enter' to clear the files.")
         
-        if os.path.exists(self.history_path):
-            os.remove(self.history_path)
-            self.logger.info(f"Cleared history file: {self.history_path}")
+        paths_to_clear: list = [self.history_path, self.prices_path, self.log_path, self.update_log_path]
+        for path in paths_to_clear:
+            if os.path.exists(path):
+                os.remove(path)
+                self.logger.info(f"Cleared file: '{path}'")
 
 
 
     # ---- FIND CURRENT BARGAINS METHODS ----
 
-    def _need_to_redownload(self) -> bool:
+    def _need_to_redownload(self, file_path: str) -> bool:
         """
         Check if the prices file exists and what the last update date is.
         If the file does not exist or is older than 1 day, return True.
+        
+        Parameters:
+        file_path: str
+            Path to the file to check.
         
         Returns:
         redownload: bool
             True if the file needs to be redownloaded, False otherwise.
         """
         try:
-            last_modified: pd.Timestamp = os.path.getmtime(self.prices_path)
+            last_modified: pd.Timestamp = os.path.getmtime(file_path)
             last_update: pd.Timestamp = pd.to_datetime(last_modified, unit='s').normalize()
             return (pd.to_datetime("today").normalize() - last_update).days > 1
         except (FileNotFoundError, KeyError):
@@ -186,8 +200,8 @@ class BargainFinder(object):
         price_info: pd.DataFrame
             DataFrame containing the latest prices and changes for each ticker.
         """
-        
-        if force_redownload or self._need_to_redownload():
+        force_redownload = True
+        if force_redownload or self._need_to_redownload(self.prices_path):
             # Get tickers from the file
             tickers: list = self.get_tickers()
             df: pd.DataFrame = pd.DataFrame(columns=['Ticker', "3 Months", "1 Month", "Current", "3 Mo Change", "1 Mo Change"])
@@ -266,6 +280,158 @@ class BargainFinder(object):
     
     
     
+    # ---- CHECK VOLATILE STOCK METHODS ----
+    
+    def _update_sell_tracking(self, 
+                         force_redownload: bool = False) -> pd.DataFrame:
+        """
+        Update prices for all tickers in the ticker file.
+        
+        Parameters:
+        force_redownload: bool
+            If True, forces redownload of prices even if the file exists.
+            Optional. Defaults to False.
+        
+        Returns:
+        price_info: pd.DataFrame
+            DataFrame containing the latest prices and changes for each ticker.
+        """
+        # read csv save file if it exists
+        if os.path.exists(self.raw_prices_path):
+            df: pd.DataFrame = pd.read_csv(self.raw_prices_path)
+            tracked_tickers: list = df.columns.tolist()[1:]
+            new_tickers: list = [ticker for ticker in self.to_sell_tickers if ticker not in tracked_tickers]
+            # get the last date in last_dates
+            last_date: pd.Timestamp = pd.to_datetime(df.iloc[-1]['Date'], format='%Y-%m-%d', errors='coerce')
+            # find difference between last date and today
+            days_diff: int = (pd.to_datetime("today").normalize() - last_date).days
+            days_diff = f"{days_diff}d" if days_diff > 0 else "1d"
+        else:
+            tracked_tickers: list = []
+            new_tickers: list = self.to_sell_tickers
+            # create an empty file
+            pd.DataFrame(columns=['Date']).to_csv(self.raw_prices_path, index=False)
+            force_redownload = True
+        
+        if force_redownload or self._need_to_redownload(self.raw_prices_path):
+            # Download past days to ensure we cover the needed range
+            self.logger.info(f"Downloading prices for {len(self.to_sell_tickers)} tickers to find sell opportunities")
+            if new_tickers:
+                data: pd.DataFrame = yf.download(new_tickers, period=self.high_price_period, interval="1d", auto_adjust=True)["Close"]
+
+            if tracked_tickers:
+                updates: pd.DataFrame = yf.download(tracked_tickers, period=days_diff, interval="1d", auto_adjust=True)["Close"]
+                updates = updates[updates.index > last_date]
+                updates = updates.reset_index()
+                
+                # combine with save data
+                saved_data = pd.read_csv(self.raw_prices_path)
+                saved_data['Date'] = pd.to_datetime(saved_data['Date'], format='%Y-%m-%d', errors='coerce')
+                saved_data = pd.concat([saved_data, updates], axis=0)
+                saved_data = saved_data.reset_index(drop=True)
+                
+                if new_tickers:
+                    data = pd.concat([data, saved_data], axis=1)
+                else:
+                    data = saved_data
+            
+            # save and return
+            self.logger.info(f"Saving prices to '{self.raw_prices_path}'")
+            data.to_csv(self.raw_prices_path)
+        else:
+            data: pd.DataFrame = pd.read_csv(self.raw_prices_path)
+            self.logger.info(f"Loaded prices from '{self.raw_prices_path}'")
+        return data
+        
+    
+    def _check_for_extremes(self, 
+                            force_redownload: bool = False) -> pd.DataFrame:
+        """
+        Check for stocks that have extreme price changes.
+        
+        Parameters:
+        period: str
+            The period for which to download prices. Defaults to "100d".
+        
+        tickers: list
+            List of stock tickers to download prices for. If None, uses the tickers from the ticker file.
+    
+        force_redownload: bool
+            If True, forces redownload of prices even if the file exists.
+            Optional. Defaults to False.
+        
+        Returns:
+        extremes: pd.DataFrame
+            DataFrame containing tickers with extreme price changes.
+        """
+        
+        data = self._update_sell_tracking(force_redownload)
+
+        # check for sell signals
+        ticker_stats: dict = {}
+        sell_any = False
+        for ticker in self.to_sell_tickers:
+            analysis: dict = {}
+            if ticker in data.columns:
+                # get the current price
+                current_price: float = data[ticker].iloc[-1]
+                analysis['Current'] = current_price
+                # get all prices before 1 month ago
+                d30: pd.Timestamp = pd.to_datetime("today").normalize() - pd.Timedelta(days=30)
+                pdb.set_trace()
+                past_prices: pd.Series = data[ticker][data.index <= d30]
+                
+                # get the high of past prices
+                if not past_prices.empty:
+                    high_price: float = past_prices.max()
+                    analysis['High'] = high_price
+                    # calculate the percentage drop
+                    analysis['dHigh'] = (current_price - high_price) / high_price * 100
+                else:
+                    analysis['High'] = current_price
+                    analysis['dHigh'] = 0.0
+                analysis["Sell"] = analysis['dHigh'] > 0
+                if analysis["Sell"]:
+                    sell_any = True
+                self.logger.info(f"Sell signal [{analysis["Sell"]}] for {ticker}: Current={current_price}, High={high_price}, dHigh={analysis['dHigh']:.2f}%")
+                ticker_stats[ticker] = analysis
+            else:
+                self.logger.warning(f"Ticker '{ticker}' not found in downloaded data.")
+                ticker_stats[ticker] = analysis
+                continue
+        return sell_any, ticker_stats
+    
+    
+    def create_sell_report(self,
+                            tickers: list = None,
+                            save_file: str = None,
+                            force_redownload: bool = False) -> None:
+        
+        # set the save file path if not provided
+        self.raw_prices_path: str = save_file if save_file is not None else self.raw_prices_path
+        
+        # set the tickers if not provided
+        if tickers is None:
+            self.to_sell_tickers: list = self.get_tickers(self.htick_path)
+                
+        sell_any, ticker_stats = self._check_for_extremes(force_redownload)
+        
+        if sell_any:
+            self.logger.info("Sell opportunities found, creating report.")
+            report: pd.DataFrame = pd.DataFrame.from_dict(ticker_stats, orient='index')
+            report.reset_index(inplace=True)
+            report.rename(columns={'index': 'Ticker'}, inplace=True)
+            report = report[report['Sell'] == True]
+            report_email: str = self.format_report(report)
+            self.logger.info(f"Created sell report with {len(report)} stocks.")
+            
+            send_table(self.sell_subject, report_email, self.recipient)
+            self.logger.info(f"Sell report sent to '{self.recipient}'")
+        else:
+            self.logger.info("No sell opportunities found.")
+                    
+    
+    
     # ---- CREATE REPORT METHODS ----
         
     def _get_recent_bargains(self, period_length: int = 7) -> pd.DataFrame:
@@ -280,7 +446,9 @@ class BargainFinder(object):
             self.logger.warning(f"History file not found: '{self.history_path}'")
             return pd.DataFrame()
         
-        hdf: pd.DataFrame = pd.read_csv(self.history_path, parse_dates=['Date'])
+        hdf: pd.DataFrame = pd.read_csv(self.history_path)
+        if 'Date' in hdf.columns:
+            hdf['Date'] = pd.to_datetime(hdf['Date'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
         if hdf.empty:
             self.logger.warning("No bargains found in history.")
             return pd.DataFrame()
@@ -292,27 +460,18 @@ class BargainFinder(object):
         return weekly_bargains
 
 
-    def create_report(self) -> None:
+    def format_report(self, report: pd.DataFrame) -> str:
         """
-        Create a regular report of bargains found and save it to a file.
+        Format the report DataFrame into HTML with links to Google Finance and Brave Search.
+        
+        Parameters:
+        report: pd.DataFrame
+            DataFrame containing the report to format.
+            
+        Returns:
+        report_email: str
+            HTML string of the formatted report with links.
         """
-        bargains: pd.DataFrame = self._get_recent_bargains(self.period_length)
-        if bargains.empty: return
-        
-        # Count the number of times each unique ticker appears
-        ticker_counts: pd.DataFrame = bargains['Ticker'].value_counts().reset_index()
-        ticker_counts.columns = ['Ticker', 'Count']
-
-        # find the average change for each ticker, rounded to two decimals
-        avg_changes: pd.DataFrame = bargains.groupby('Ticker').agg({'3 Mo Change': 'mean', '1 Mo Change': 'mean'}).reset_index()
-        avg_changes.columns = ['Ticker', 'Avg 3 Mo Change', 'Avg 1 Mo Change']
-        avg_changes['Avg 3 Mo Change'] = avg_changes['Avg 3 Mo Change'].map(lambda x: f"{x:.2f}%")
-        avg_changes['Avg 1 Mo Change'] = avg_changes['Avg 1 Mo Change'].map(lambda x: f"{x:.2f}%")
-
-        # Merge the counts and average changes
-        report: pd.DataFrame = pd.merge(ticker_counts, avg_changes, on='Ticker')
-        
-        
         google_finance_link: str = "https://www.google.com/finance/quote/{}:NYSE?window=6M"
         brave_search_link: str = "https://search.brave.com/search?q={}+stock&rh_type=st&range=ytd"
         
@@ -327,9 +486,33 @@ class BargainFinder(object):
         # Make Ticker column bold in HTML
         report['Ticker'] = report['Ticker'].apply(lambda x: f"<b>{x}</b>")
         report_email: str = report.to_html(escape=False, index=False, justify="center", border=1)
-        self.logger.info(f"Created report with {len(report)} bargains.")
-        send_table(self.subject, report_email, self.recipient)
-        self.logger.info(f"Report sent to '{self.recipient}'")
+        return report_email
+
+    
+    def create_bargain_report(self) -> None:
+        """
+        Create a regular report of bargains found and save it to a file.
+        """
+        bargains: pd.DataFrame = self._get_recent_bargains(self.email_rate)
+        if bargains.empty: return
+        
+        # Count the number of times each unique ticker appears
+        ticker_counts: pd.DataFrame = bargains['Ticker'].value_counts().reset_index()
+        ticker_counts.columns = ['Ticker', 'Count']
+
+        # find the average change for each ticker, rounded to two decimals
+        avg_changes: pd.DataFrame = bargains.groupby('Ticker').agg({'3 Mo Change': 'mean', '1 Mo Change': 'mean'}).reset_index()
+        avg_changes.columns = ['Ticker', 'Avg 3 Mo Change', 'Avg 1 Mo Change']
+        avg_changes['Avg 3 Mo Change'] = avg_changes['Avg 3 Mo Change'].map(lambda x: f"{x:.2f}%")
+        avg_changes['Avg 1 Mo Change'] = avg_changes['Avg 1 Mo Change'].map(lambda x: f"{x:.2f}%")
+
+        # Merge the counts and average changes
+        report: pd.DataFrame = pd.merge(ticker_counts, avg_changes, on='Ticker')
+        report_email: str= self.format_report(report)
+        self.logger.info(f"Created bargain report with {len(report)} bargains.")
+        
+        send_table(self.bargain_subject, report_email, self.recipient)
+        self.logger.info(f"Bargain report sent to '{self.recipient}'")
 
 
 
@@ -343,7 +526,9 @@ class BargainFinder(object):
             The date to check.
         """
         saturday: int = 5
-        return dt.weekday() < saturday  # Mon–Fri
+        result = dt.weekday() < saturday  # Mon–Fri
+        self.logger.debug(f"{dt.strftime('%Y-%m-%d')} is {'' if result else 'not '}a market day")
+        return result
 
 
     def _has_updated_today(self) -> bool:
@@ -353,11 +538,13 @@ class BargainFinder(object):
         has_updated: bool
             True if the update log exists and the last update was today, False otherwise.
         """
-        if not os.path.exists(self.update_log):
+        if not os.path.exists(self.update_log_path):
             return False
-        with open(self.update_log, 'r') as file:
+        with open(self.update_log_path, 'r') as file:
             last_update: pd.Timestamp = pd.to_datetime(file.readline().strip())
-        return last_update.date() == pd.to_datetime("now").date()
+        updated_today = last_update.date() == pd.to_datetime("now").date()
+        self.logger.debug(f"Last update was {'today' if updated_today else 'not today'} ({last_update})")
+        return updated_today
 
 
     def _wait_until(self, target_time: datetime) -> None:
@@ -401,24 +588,20 @@ class BargainFinder(object):
         """
         self.logger.info("Executing BargainFinder routine")
         self.find_current_bargains()
+        # self.create_sell_report()
 
         # Create a report if today is the specified day of the week
         if self.update_time.weekday() == day_of_week:  # Thursday
             self.logger.info("Creating weekly report")
-            report_html: str = self.create_report()
-            if report_html:
-                send_table(self.subject, report_html, self.recipient)
-            else:
-                self.logger.warning("No bargains found to report or report generation failed.")
-                self.logger.debug("Report HTML is empty or None.")
+            self.create_bargain_report()
             
-            # Log update
-            with open(self.update_log, 'w') as file:
-                file.write(pd.to_datetime("now").isoformat())
-            self.logger.info(f"Update logged at {pd.to_datetime('now').isoformat()}")
+        # Log update
+        with open(self.update_log_path, 'w') as file:
+            file.write(pd.to_datetime("now").isoformat())
+        self.logger.info(f"Update logged at {pd.to_datetime('now').isoformat()}")
 
 
-    def run(self):
+    def run(self, auto: bool = True):
         """
         Run the BargainFinder to find bargains every weekday at 3 PM and create a report every Thursday at 3 PM.
         """
@@ -427,20 +610,23 @@ class BargainFinder(object):
         iter_count = 0
         start_date = pd.to_datetime("now").normalize()
         
-        while True:
+        dont_end = True
+        while dont_end:
             # wait until the next update time
             now = pd.to_datetime("now").normalize()
             self.update_time = now + pd.Timedelta(hours=self.update_hour)  # Today at 3 PM
-            self._wait_til_tmr(now)
-            self._wait_until(self.update_time)
-            self._read_config(self.config_path)
+            if auto:
+                self._wait_til_tmr(now)
+                self._wait_until(self.update_time)
             
             # check if we should update, then execute update
-            if self._is_market_day(self.update_time) and not self._has_updated_today():
+            self._read_config(self.config_path)
+            if self._is_market_day(pd.to_datetime("now")) and not self._has_updated_today():
                 self._execute()
                 update_count += 1
             
             # Log the iteration
+            dont_end = auto
             iter_count += 1
             days_since_start = (now - start_date).days
             self.logger.info(f"Iteration {iter_count}: Updated {update_count} times in {days_since_start} days\n\n\n")
@@ -463,12 +649,18 @@ if __name__ == "__main__":
     # args = parse_args()
     finder = BargainFinder()
     try:
-        finder.run()
+        finder.run(auto=False)
+        # finder.create_sell_report(force_redownload=True)
     except KeyboardInterrupt:
         print("BargainFinder stopped by user.")
     except Exception as e:
-        print(f"An error occurred: {e}")
-        
+        if pd.to_datetime("now").hour == finder.update_hour:
+            print(e)
+            with open("logs/errors.txt", "a") as f:
+                f.write(traceback.format_exc())
+            send_email("ERROR", traceback.format_exc(), finder.recipient)
+        else:
+            raise e
     # TO EXIT
     # taskkill /PID <your_pid> /F
 
