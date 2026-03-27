@@ -20,16 +20,6 @@ from send_email import send_email, send_table
 PROJECT_ROOT = Path(__file__).resolve().parent
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 
-WEEKDAY_NAMES = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-    "Sunday",
-]
-
 
 def env_flag(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -60,7 +50,6 @@ class BargainFinder:
         self._read_config(self.config_path, initialize=True)
         self._set_logging()
         self._log_runtime_setup()
-        self.update_time = pd.to_datetime("now").normalize() - pd.Timedelta(days=7)
 
     def _save_attributes(self) -> dict:
         return {
@@ -85,9 +74,6 @@ class BargainFinder:
         self.high_price_period = os.getenv(
             "BARGAIN_HIGH_PRICE_PERIOD",
             config.get("high_price_period", "500d"),
-        )
-        self.update_hour = int(
-            float(os.getenv("BARGAIN_UPDATE_HOUR", config.get("update_hour", 15)))
         )
         self.ticker_path = config.get("ticker_path", "meta/bargain_tickers.txt")
         self.htick_path = config.get("htick_path", "meta/high_tickers.txt")
@@ -151,10 +137,9 @@ class BargainFinder:
 
         self.logger.info("Program initialized with PID %s", os.getpid())
         self.logger.info(
-            "BargainFinder initialized with tol=%s, email_rate=%s, update_hour=%s",
+            "BargainFinder initialized with tol=%s, email_rate=%s",
             self.tol,
             self.email_rate,
-            self.update_hour,
         )
         self.logger.info(
             "Database persistence %s",
@@ -195,26 +180,6 @@ class BargainFinder:
                 ),
                 context,
                 ", ".join(missing),
-            )
-            return False
-        return True
-
-    def _should_send_weekly_report(self, day_of_week: int) -> bool:
-        if env_flag("BARGAIN_FORCE_REPORT", default=False):
-            self.logger.info(
-                (
-                    "BARGAIN_FORCE_REPORT is enabled; sending the weekly "
-                    "report outside the normal schedule."
-                )
-            )
-            return True
-
-        weekday = self.update_time.weekday()
-        if weekday != day_of_week:
-            self.logger.info(
-                "Skipping weekly report because today is %s; scheduled report day is %s.",
-                WEEKDAY_NAMES[weekday],
-                WEEKDAY_NAMES[day_of_week],
             )
             return False
         return True
@@ -292,13 +257,10 @@ class BargainFinder:
         return 365
 
     def _expected_latest_price_date(self) -> pd.Timestamp:
-        now = pd.to_datetime("now")
-        expected = now.normalize()
-        if expected.weekday() >= 5 or now.hour < self.update_hour:
-            expected -= pd.Timedelta(days=1)
+        expected = pd.to_datetime("now").normalize()
         while expected.weekday() >= 5:
             expected -= pd.Timedelta(days=1)
-        return expected.normalize()
+        return expected
 
     def _normalize_history_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:
@@ -1052,69 +1014,10 @@ class BargainFinder:
         else:
             self.logger.warning("Bargain report email send failed.")
 
-    def _is_market_day(self, timestamp: pd.Timestamp) -> bool:
-        result = timestamp.weekday() < 5
-        self.logger.debug(
-            "%s is %sa market day",
-            timestamp.strftime("%Y-%m-%d"),
-            "" if result else "not ",
-        )
-        return result
-
-    def _has_updated_today(self) -> bool:
-        if self.use_database:
-            last_update = repository.get_last_update()
-            if last_update is None:
-                return False
-            updated_today = last_update.date() == pd.to_datetime("now").date()
-            self.logger.debug(
-                "Last update was %s (%s)",
-                "today" if updated_today else "not today",
-                last_update,
-            )
-            return updated_today
-
-        update_log_path = resolve_path(self.update_log_path)
-        if not update_log_path.exists():
-            return False
-
-        with open(update_log_path, "r", encoding="utf-8") as file_handle:
-            last_update = pd.to_datetime(file_handle.readline().strip())
-        updated_today = last_update.date() == pd.to_datetime("now").date()
-        self.logger.debug(
-            "Last update was %s (%s)",
-            "today" if updated_today else "not today",
-            last_update,
-        )
-        return updated_today
-
-    def _wait_until(self, target_time: datetime) -> None:
-        now = pd.to_datetime("now")
-        wait_seconds = int((target_time - now).total_seconds())
-        if wait_seconds > 0:
-            self.logger.info(
-                "Sleeping until %s (%s seconds)",
-                target_time.strftime("%Y-%m-%d %H:%M:%S"),
-                wait_seconds,
-            )
-            time.sleep(wait_seconds)
-
-    def _wait_til_tmr(self, now: pd.Timestamp) -> None:
-        if pd.to_datetime("now") <= self.update_time:
-            return
-
-        next_day = now + pd.Timedelta(days=1)
-        while not self._is_market_day(next_day):
-            next_day += pd.Timedelta(days=1)
-        self.update_time = next_day + pd.Timedelta(hours=self.update_hour)
-
-    def _execute(self, day_of_week: int = 3) -> int:
+    def _execute(self) -> int:
         self.logger.info("Executing BargainFinder routine")
         bargains = self.find_current_bargains()
-
-        if self._should_send_weekly_report(day_of_week):
-            self.logger.info("Creating weekly report")
-            self.create_bargain_report()
+        self.create_bargain_report()
 
         if self.use_database:
             repository.set_last_update(pd.to_datetime("now"))
@@ -1127,39 +1030,10 @@ class BargainFinder:
         self.logger.info("Update logged at %s", pd.to_datetime("now").isoformat())
         return len(bargains)
 
-    def run(self, auto: bool = True) -> int:
-        update_count = 0
-        iter_count = 0
-        start_date = pd.to_datetime("now").normalize()
-        bargain_count = 0
-
-        keep_running = True
-        while keep_running:
-            now = pd.to_datetime("now").normalize()
-            self.update_time = now + pd.Timedelta(hours=self.update_hour)
-            if auto:
-                self._wait_til_tmr(now)
-                self._wait_until(self.update_time)
-
-            self._read_config(self.config_path)
-            if (
-                self._is_market_day(pd.to_datetime("now"))
-                and not self._has_updated_today()
-            ):
-                bargain_count = self._execute()
-                update_count += 1
-
-            keep_running = auto
-            iter_count += 1
-            days_since_start = (now - start_date).days
-            self.logger.info(
-                "Iteration %s: Updated %s times in %s days",
-                iter_count,
-                update_count,
-                days_since_start,
-            )
-
-        return bargain_count
+    def run(self) -> int:
+        self.logger.info("Running BargainFinder")
+        self._read_config(self.config_path)
+        return self._execute()
 
 
 def lambda_handler(event, context):
@@ -1169,7 +1043,7 @@ def lambda_handler(event, context):
     started_at = datetime.now(timezone.utc)
     bargain_count = 0
     try:
-        bargain_count = finder.run(auto=False)
+        bargain_count = finder.run()
     except KeyboardInterrupt:
         print("BargainFinder stopped by user.")
         if finder.use_database:
@@ -1191,13 +1065,12 @@ def lambda_handler(event, context):
                 error_text=error_trace,
             )
 
-        if pd.to_datetime("now").hour == finder.update_hour:
-            errors_path = resolve_path("logs/errors.txt")
-            errors_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(errors_path, "a", encoding="utf-8") as file_handle:
-                file_handle.write(error_trace)
-            if finder._can_send_email("error alert"):
-                send_email("ERROR", error_trace, finder.recipient)
+        errors_path = resolve_path("logs/errors.txt")
+        errors_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(errors_path, "a", encoding="utf-8") as file_handle:
+            file_handle.write(error_trace)
+        if finder._can_send_email("error alert"):
+            send_email("ERROR", error_trace, finder.recipient)
         raise
     else:
         if finder.use_database:

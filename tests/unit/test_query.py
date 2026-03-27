@@ -74,17 +74,6 @@ class TestQueryModule(unittest.TestCase):
             tickers = finder.get_tickers(str(ticker_file))
         self.assertEqual(tickers, ["AAPL", "MSFT"])
 
-    def test_should_send_weekly_report_logs_non_report_day(self):
-        finder = self._new_finder(use_db=False)
-        finder.update_time = pd.Timestamp("2026-03-27")
-        with self.assertLogs(finder.logger.name, level="INFO") as logs:
-            should_send = finder._should_send_weekly_report(3)
-
-        self.assertFalse(should_send)
-        self.assertIn(
-            "Skipping weekly report because today is Friday", "\n".join(logs.output)
-        )
-
     def test_can_send_email_logs_missing_settings(self):
         finder = self._new_finder(use_db=False)
         finder.recipient = ""
@@ -336,16 +325,8 @@ class TestQueryModule(unittest.TestCase):
         self.assertIn("Sell", stats["AAPL"])
         self.assertIsInstance(sell_any, bool)
 
-    def test_has_updated_today_database(self):
-        finder = self._new_finder(use_db=True)
-        with patch(
-            "query.repository.get_last_update", return_value=pd.to_datetime("now")
-        ):
-            self.assertTrue(finder._has_updated_today())
-
     def test_execute_updates_state_database(self):
         finder = self._new_finder(use_db=True)
-        finder.update_time = pd.Timestamp("2025-01-02")
         with patch.object(
             finder,
             "find_current_bargains",
@@ -353,16 +334,14 @@ class TestQueryModule(unittest.TestCase):
         ):
             with patch.object(finder, "create_bargain_report"):
                 with patch("query.repository.set_last_update") as set_last:
-                    count = finder._execute(day_of_week=3)
+                    count = finder._execute()
         set_last.assert_called_once()
         self.assertEqual(count, 1)
 
-    def test_run_auto_false_executes_once(self):
+    def test_run_executes_once(self):
         finder = self._new_finder(use_db=False)
-        with patch.object(finder, "_is_market_day", return_value=True):
-            with patch.object(finder, "_has_updated_today", return_value=False):
-                with patch.object(finder, "_execute", return_value=2):
-                    result = finder.run(auto=False)
+        with patch.object(finder, "_execute", return_value=2):
+            result = finder.run()
         self.assertEqual(result, 2)
 
     def test_lambda_handler_success(self):
@@ -377,7 +356,6 @@ class TestQueryModule(unittest.TestCase):
         with patch("query.BargainFinder") as finder_cls:
             finder = finder_cls.return_value
             finder.use_database = True
-            finder.update_hour = pd.to_datetime("now").hour
             finder.recipient = "to@example.com"
             finder.run.side_effect = RuntimeError("boom")
             with patch("query.repository.record_execution") as record_exec:
