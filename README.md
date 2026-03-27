@@ -72,14 +72,28 @@ data/
 ├── prices.csv
 └── bargain_history.csv
 meta/
-├── tickers.txt
-├── credentials.json
+├── runtime_secrets.env
 ├── config.yaml
 └── update_log.txt
 investopps/
 ├── query.py
 ├── send_email.py
 └── requirements.txt
+```
+
+Create `meta/runtime_secrets.env` for local runs. GitHub Actions now writes the same file from repository secrets before invoking the script.
+
+Example:
+
+```dotenv
+DATABASE_URL=postgresql://...
+REPORT_RECIPIENT=you@example.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=you@example.com
+SMTP_PASSWORD=app-password
+SMTP_FROM=you@example.com
+SMTP_USE_TLS=true
 ```
 
 ---
@@ -108,21 +122,16 @@ To stop the script:
 
 ## Email Reports
 
-The script sends weekly email reports on Thursdays at the configured hour. Each report includes:
+The script sends weekly email reports on Thursdays at the configured hour. Local runs on other weekdays will not send the weekly report unless `BARGAIN_FORCE_REPORT=true` is set. When email delivery is skipped because secrets are missing, the reason is written to the log.
+
+Each report includes:
 
 - Tickers with repeated bargain appearances
 - Average changes over 1 and 3 months
 - Google Finance and Brave search links
 - Clean HTML table layout
 
-To test Gmail API access separately, run:
-
-```python
-from send_email import get_credentials
-get_credentials()
-```
-
-Ensure `credentials.json` is correct and the Gmail API is enabled for your account.
+To test local email delivery on demand, populate `meta/runtime_secrets.env` and run with `BARGAIN_FORCE_REPORT=true`.
 
 
 ---

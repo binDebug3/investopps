@@ -1,0 +1,51 @@
+name: Weekly Bargain Run
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 21 * * 4'
+
+jobs:
+  run-bargain-finder:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      REPORT_RECIPIENT: ${{ secrets.REPORT_RECIPIENT }}
+      SMTP_HOST: "smtp.gmail.com"
+      SMTP_PORT: "587"
+      SMTP_USERNAME: ${{ secrets.REPORT_RECIPIENT }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_FROM: ${{ secrets.REPORT_RECIPIENT }}
+      SMTP_USE_TLS: "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Materialize runtime secrets
+        shell: bash
+        run: |
+          mkdir -p meta
+          cat <<EOF > meta/runtime_secrets.env
+          DATABASE_URL=${DATABASE_URL}
+          REPORT_RECIPIENT=${REPORT_RECIPIENT}
+          SMTP_HOST=${SMTP_HOST}
+          SMTP_PORT=${SMTP_PORT}
+          SMTP_USERNAME=${SMTP_USERNAME}
+          SMTP_PASSWORD=${SMTP_PASSWORD}
+          SMTP_FROM=${SMTP_FROM}
+          SMTP_USE_TLS=${SMTP_USE_TLS}
+          EOF
+
+      - name: Initialize Neon schema
+        run: python scripts/init_neon.py
+
+      - name: Run bargain finder
+        run: python query.py

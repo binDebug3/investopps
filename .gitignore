@@ -137,12 +137,14 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+.secrets.env
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+meta/runtime_secrets.env
 
 # Spyder project settings
 .spyderproject

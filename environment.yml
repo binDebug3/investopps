@@ -1,0 +1,12 @@
+name: investopps
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - pip
+  - pandas>=1.5.0
+  - pyyaml>=6.0
+  - yfinance>=0.2.33
+  - pip:
+      - psycopg[binary]>=3.2
